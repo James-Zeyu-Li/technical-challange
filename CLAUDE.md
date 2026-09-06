@@ -18,5 +18,8 @@ All code in this project must follow:
 - **KISS** (Keep It Simple, Stupid): prefer the simplest design that works; avoid unnecessary complexity.
 - **YAGNI** (You Aren't Gonna Need It): don't build for hypothetical future requirements; implement only what's needed now.
 
+## Testing
+Follow test-driven development: write a failing test for the behavior first, then implement the minimum code to make it pass. Don't write implementation code without a test that already demands it.
+
 ## Spec adherence
 Before changing pipeline/retry/dedup/failure-handling behavior, read [aggregator/SPEC.md](aggregator/SPEC.md) — those decisions are confirmed. If a decision needs to change, update SPEC.md in the same change, don't just change the code.
