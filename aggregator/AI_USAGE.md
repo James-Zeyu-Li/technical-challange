@@ -19,12 +19,27 @@ reliable data pipeline aggregator, per the requirements in `task.md`.
   retry/rate-limit behavior per source).
 - Framework/language tradeoff discussion (Python vs Go, Flask vs Gin vs
   FastAPI/asyncio) for a concurrent, I/O-bound fan-out workload.
-- (To be updated as implementation proceeds: code generation for HTTP client,
-  normalization logic, retry/backoff, rate limiting, and test suite.)
+- Normalization layer (`normalize.py`/`sources.py`) and its unit tests.
+- HTTP retry layer (`http_retry.py`): drafted 10 test cases (one per source
+  type/status-code scenario I specified — success, non-retryable failure,
+  502/503/429 eventually succeeding vs. exhausting retries, missing
+  `Retry-After`) plus the implementation to pass them.
+- (To be updated as implementation proceeds: rate limiting, concurrency,
+  aggregation/summary layer.)
 
 ## Feedback From Specification Review
 
-- _(To be filled in once `SPEC.md`/`PLAN.md` are drafted and reviewed.)_
+- Pushed back on treating 429 and 502/503 as needing separate retry
+  mechanisms — confirmed both carry `Retry-After` in this mock and should
+  share one retry engine, differing only in cause (rate-limit vs failure),
+  not handling.
+- Rejected per-source/per-status-code retry counts as overfitting to this
+  mock's known failure sequence (cursor-2/cursor-3); settled on one global
+  `MAX_ATTEMPTS` constant as an explicit cost/latency tradeoff instead.
+- Requested that `PLAN.md`'s implementation content be reflected in
+  `SPEC.md` as behavioral Goals (what the system must do), keeping `PLAN.md`
+  to the how (field maps, retry engine, concurrency) — resulted in SPEC's
+  Goals/Non-Goals/Failure Behavior/Assumptions/Acceptance Criteria sections.
 
 ## Verification Process
 
