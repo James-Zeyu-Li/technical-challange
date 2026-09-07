@@ -22,11 +22,7 @@ class MalformedRecordError(Exception):
 
 
 def normalize(raw_record: dict, source: str, field_map: FieldMap) -> dict:
-    """Map a raw record's fields into the unified schema using `field_map`.
-
-    Raises MalformedRecordError on the first field that's missing or fails
-    its type caster, so callers can skip just that one record.
-    """
+    """Map a raw record's fields into the unified schema using `field_map`."""
     result: dict[str, Any] = {"source": source}
     for target_field, (source_key, caster) in field_map.items():
         try:

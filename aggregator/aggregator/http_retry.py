@@ -68,14 +68,7 @@ def fetch_with_retry(
     default_backoff: float = DEFAULT_BACKOFF_SECONDS,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> HTTPResponse:
-    """Call `transport()` up to `max_attempts` times, retrying retryable failures.
-
-    `transport` performs one HTTP attempt and either returns an HTTPResponse
-    or raises TimeoutError/ConnectionError (treated the same as a retryable
-    status code, and wrapped in TransportError once retries are exhausted).
-    Retry-After is honored when present and non-negative; otherwise falls
-    back to `default_backoff`.
-    """
+    """Call `transport()` up to `max_attempts` times, retrying retryable failures."""
     if max_attempts < 1:
         raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
 

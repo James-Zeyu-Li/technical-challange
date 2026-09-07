@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SourceResult:
+    """Outcome of fetching and normalizing one source."""
+
     source: str
     records: list[dict] = field(default_factory=list)
     skipped: int = 0
@@ -32,6 +34,8 @@ class SourceResult:
 
 @dataclass
 class RunSummary:
+    """Results for all sources from one run, plus cross-source totals."""
+
     results: list[SourceResult]
 
     @property
@@ -114,6 +118,7 @@ def run(
     sleep_fn: Callable[[float], None] = time.sleep,
     now_fn: Callable[[], float] = time.monotonic,
 ) -> RunSummary:
+    """Fetch and normalize all sources, one after another."""
     results = [
         run_source(base_url, source_name, fetch_page, sleep_fn, now_fn) for source_name in FIELD_MAPS
     ]
@@ -121,6 +126,7 @@ def run(
 
 
 def main() -> None:
+    """CLI entry point: run() against the real mock service and print a summary."""
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     summary = run()
     for result in summary.results:

@@ -23,9 +23,7 @@ class PaginationLimitExceededError(Exception):
 
 
 class MalformedPaginationEnvelopeError(Exception):
-    """Raised when a page's pagination-control fields (not its records) are
-    missing or the wrong type - we can no longer safely tell whether more
-    pages exist, so this is a source-level failure, not a per-record one."""
+    """Raised when a page's pagination-control fields are missing or the wrong type."""
 
     def __init__(self, source: str, body: dict, field: str, reason: str) -> None:
         self.source = source
