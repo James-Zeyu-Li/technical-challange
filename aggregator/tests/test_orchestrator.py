@@ -2,6 +2,7 @@
 normalize together. `fetch_page` is faked here (no real network, no real
 mock server) - same test-double approach used for the other layers."""
 
+import time as real_time
 import unittest
 from unittest.mock import Mock
 
@@ -336,6 +337,74 @@ class TestOverallRunDeadline(unittest.TestCase):
         self.assertIsNone(by_source["source_a"].error)
         self.assertIsNotNone(by_source["source_b"].error)
         self.assertIsNotNone(by_source["source_c"].error)
+
+
+class TestConcurrentFetching(unittest.TestCase):
+    """run() fetches all three sources in parallel, so the wall-clock cost
+    of a slow source doesn't stack with the others. Uses real time.sleep
+    (not the injected sleep_fn/now_fn) since this specifically tests real
+    wall-clock overlap, not retry/throttle timing."""
+
+    def test_sources_are_fetched_concurrently_not_sequentially(self):
+        """Three sources that each take real_delay to respond finish in about one real_delay, not three."""
+        real_delay = 0.05
+
+        def fetch_page(url: str) -> HTTPResponse:
+            real_time.sleep(real_delay)
+            if "source-a" in url:
+                body = {"page": 1, "total_pages": 1, "products": [{"id": "a-1", "name": "X", "price": 1.0, "category": "c"}]}
+            elif "source-b" in url:
+                body = {"items": [{"sku": "b-1", "title": "Y", "amount_cents": 100, "department": "d"}], "next_cursor": None}
+            else:
+                body = {"data": [{"product_id": "c-1", "product_name": "Z", "price": "1.00", "type": "e"}], "next_offset": None}
+            return HTTPResponse(status_code=200, body=body)
+
+        started = real_time.perf_counter()
+        summary = run("http://localhost:8080", fetch_page)
+        elapsed = real_time.perf_counter() - started
+
+        self.assertEqual(summary.status, "success")
+        # Sequential would take >= 3 * real_delay; concurrent should stay
+        # well under 2 * real_delay even with scheduling overhead.
+        self.assertLess(elapsed, real_delay * 2)
+
+    def test_results_stay_in_a_stable_source_order(self):
+        """Results are ordered by source regardless of which one finishes first."""
+
+        def fetch_page(url: str) -> HTTPResponse:
+            if "source-a" in url:
+                real_time.sleep(0.05)  # slowest
+                body = {"page": 1, "total_pages": 1, "products": []}
+            elif "source-b" in url:
+                body = {"items": [], "next_cursor": None}  # fastest
+            else:
+                body = {"data": [], "next_offset": None}
+            return HTTPResponse(status_code=200, body=body)
+
+        summary = run("http://localhost:8080", fetch_page)
+        self.assertEqual([r.source for r in summary.results], ["source_a", "source_b", "source_c"])
+
+    def test_wall_clock_seconds_reflects_real_concurrent_time_not_the_sum(self):
+        """Now that sources run concurrently, RunSummary needs its own real wall-clock measurement - summing each source's own elapsed_seconds would overcount, since those overlap in time."""
+        real_delay = 0.05
+
+        def fetch_page(url: str) -> HTTPResponse:
+            real_time.sleep(real_delay)
+            if "source-a" in url:
+                body = {"page": 1, "total_pages": 1, "products": []}
+            elif "source-b" in url:
+                body = {"items": [], "next_cursor": None}
+            else:
+                body = {"data": [], "next_offset": None}
+            return HTTPResponse(status_code=200, body=body)
+
+        started = real_time.perf_counter()
+        summary = run("http://localhost:8080", fetch_page)
+        external_elapsed = real_time.perf_counter() - started
+
+        self.assertAlmostEqual(summary.wall_clock_seconds, external_elapsed, delta=0.05)
+        self.assertLess(summary.wall_clock_seconds, real_delay * 2)
+        self.assertGreaterEqual(summary.total_source_seconds, real_delay * 2)
 
 
 if __name__ == "__main__":

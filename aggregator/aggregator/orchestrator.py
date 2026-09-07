@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from aggregator.http_retry import HTTPResponse, RetryExhaustedError
@@ -41,6 +42,10 @@ class RunSummary:
     """Results for all sources from one run, plus cross-source totals."""
 
     results: list[SourceResult]
+    # Real wall-clock time for the whole run, measured directly around the
+    # concurrent fetch. Not the same as total_source_seconds, since sources
+    # run in parallel and their individual times overlap.
+    wall_clock_seconds: float = 0.0
 
     @property
     def status(self) -> str:
@@ -64,7 +69,10 @@ class RunSummary:
         return sum(r.duplicates for r in self.results)
 
     @property
-    def elapsed_seconds(self) -> float:
+    def total_source_seconds(self) -> float:
+        """Sum of each source's own elapsed time. Since sources run
+        concurrently, this overcounts real time and should not be read as
+        the run's duration - see wall_clock_seconds for that."""
         return sum(r.elapsed_seconds for r in self.results)
 
 
@@ -124,18 +132,26 @@ def run(
     now_fn: Callable[[], float] = time.monotonic,
     max_seconds: float | None = None,
 ) -> RunSummary:
-    """Fetch and normalize all sources, one after another.
+    """Fetch and normalize all sources concurrently, one worker thread per source.
 
     max_seconds, if given, bounds the whole run's wall-clock time. A source
-    whose deadline has already passed by the time its turn comes up is
+    whose deadline has already passed by the time it gets scheduled is
     reported as failed rather than attempted.
+
+    Sources are independent (no shared mutable state), so running them on
+    separate threads needs no changes to run_source() or anything below it.
     """
     deadline = now_fn() + max_seconds if max_seconds is not None else None
-    results = [
-        run_source(base_url, source_name, fetch_page, sleep_fn, now_fn, deadline)
-        for source_name in FIELD_MAPS
-    ]
-    return RunSummary(results=results)
+    source_names = list(FIELD_MAPS)
+    run_started_at = now_fn()
+    with ThreadPoolExecutor(max_workers=len(source_names)) as executor:
+        results = list(
+            executor.map(
+                lambda source_name: run_source(base_url, source_name, fetch_page, sleep_fn, now_fn, deadline),
+                source_names,
+            )
+        )
+    return RunSummary(results=results, wall_clock_seconds=now_fn() - run_started_at)
 
 
 def main() -> None:
@@ -157,7 +173,7 @@ def main() -> None:
     print(
         f"Overall: {summary.status} - {summary.total_records} records, "
         f"{summary.total_skipped} skipped, {summary.total_duplicates} duplicates, "
-        f"{summary.elapsed_seconds:.2f}s total"
+        f"{summary.wall_clock_seconds:.2f}s wall clock ({summary.total_source_seconds:.2f}s summed across sources)"
     )
 
 
