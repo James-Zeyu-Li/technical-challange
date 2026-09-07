@@ -212,5 +212,88 @@ class TestDuplicateHandling(unittest.TestCase):
         self.assertEqual(result.duplicates, 0)
 
 
+class TestRunLevelObservability(unittest.TestCase):
+    """Per task.md: 'produce useful run-level summary information' and
+    'provide enough observability to understand failures and performance'.
+    elapsed_seconds and waits are recorded per source; RunSummary exposes
+    cross-source totals."""
+
+    def test_elapsed_seconds_is_recorded_even_on_success(self):
+        """A successful source records how long its fetch+normalize took, using the injected now_fn (not real wall-clock time)."""
+        fetch_page = fake_fetch_page(
+            {
+                "http://localhost:8080/source-a/products?page=1": HTTPResponse(
+                    status_code=200,
+                    body={"page": 1, "total_pages": 1, "products": [{"id": "a-1", "name": "X", "price": 1.0, "category": "c"}]},
+                )
+            }
+        )
+        # 3 calls: started_at, RateLimiter.record_request()'s timestamp, elapsed_seconds.
+        now_fn = Mock(side_effect=[100.0, 101.0, 103.5])
+        result = run_source("http://localhost:8080", "source_a", fetch_page, now_fn=now_fn)
+        self.assertAlmostEqual(result.elapsed_seconds, 3.5)
+
+    def test_elapsed_seconds_is_recorded_on_failure_too(self):
+        """A source that ultimately fails still reports how long was spent before giving up."""
+
+        def always_fails(url: str) -> HTTPResponse:
+            return HTTPResponse(status_code=503, headers={"Retry-After": "0"})
+
+        now_fn = Mock(side_effect=[200.0, 201.0])
+        result = run_source("http://localhost:8080", "source_b", always_fails, now_fn=now_fn)
+        self.assertIsNotNone(result.error)
+        self.assertAlmostEqual(result.elapsed_seconds, 1.0)
+
+    def test_waits_counts_retry_backoff_events(self):
+        """Each time the retry engine backs off (a transient failure), that's one recorded wait - visible without reading logs."""
+        calls = []
+
+        def fetch_page(url: str) -> HTTPResponse:
+            calls.append(url)
+            if len(calls) <= 2:
+                return HTTPResponse(status_code=502, headers={"Retry-After": "0"})
+            return HTTPResponse(status_code=200, body={"items": [{"sku": "b-1"}], "next_cursor": None})
+
+        result = run_source("http://localhost:8080", "source_b", fetch_page)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.waits, 2)
+
+    def test_waits_is_zero_when_nothing_needed_to_wait(self):
+        """A clean single successful request records zero waits."""
+        fetch_page = fake_fetch_page(
+            {
+                "http://localhost:8080/source-a/products?page=1": HTTPResponse(
+                    status_code=200,
+                    body={"page": 1, "total_pages": 1, "products": [{"id": "a-1", "name": "X", "price": 1.0, "category": "c"}]},
+                )
+            }
+        )
+        result = run_source("http://localhost:8080", "source_a", fetch_page)
+        self.assertEqual(result.waits, 0)
+
+    def test_run_summary_exposes_cross_source_totals(self):
+        """RunSummary aggregates records/skipped/duplicates across all sources, not just per-source results."""
+
+        def fetch_page(url: str) -> HTTPResponse:
+            if "source-a" in url:
+                body = {"page": 1, "total_pages": 1, "products": [{"id": "a-1", "name": "X", "price": 1.0, "category": "c"}]}
+            elif "source-b" in url:
+                body = {
+                    "items": [
+                        {"sku": "b-1", "title": "Y", "amount_cents": 100, "department": "d"},
+                        {"sku": "b-2", "title": "Bad", "amount_cents": "oops", "department": "d"},
+                    ],
+                    "next_cursor": None,
+                }
+            else:
+                body = {"data": [{"product_id": "c-1", "product_name": "Z", "price": "1.00", "type": "e"}], "next_offset": None}
+            return HTTPResponse(status_code=200, body=body)
+
+        summary = run("http://localhost:8080", fetch_page)
+        self.assertEqual(summary.total_records, 3)
+        self.assertEqual(summary.total_skipped, 1)
+        self.assertEqual(summary.total_duplicates, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

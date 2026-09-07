@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 3
 DEFAULT_BACKOFF_SECONDS = 0.5
@@ -81,7 +84,11 @@ def fetch_with_retry(
             response = transport()
         except (TimeoutError, ConnectionError) as exc:
             if attempt >= max_attempts:
+                logger.error("attempt %d/%d failed, giving up: %s", attempt, max_attempts, exc)
                 raise TransportError(exc, attempt) from exc
+            logger.warning(
+                "attempt %d/%d failed (%s); retrying in %.2fs", attempt, max_attempts, exc, default_backoff
+            )
             sleep_fn(default_backoff)
             continue
 
@@ -89,9 +96,20 @@ def fetch_with_retry(
             return response
 
         if not is_retryable(response.status_code) or attempt >= max_attempts:
+            logger.error(
+                "attempt %d/%d failed with status %d, giving up", attempt, max_attempts, response.status_code
+            )
             raise HTTPError(response, attempt)
 
         wait = get_retry_after(response.headers)
-        sleep_fn(wait if wait is not None else default_backoff)
+        wait_seconds = wait if wait is not None else default_backoff
+        logger.warning(
+            "attempt %d/%d failed with status %d; retrying in %.2fs",
+            attempt,
+            max_attempts,
+            response.status_code,
+            wait_seconds,
+        )
+        sleep_fn(wait_seconds)
 
     raise AssertionError("unreachable")  # loop always returns or raises above
