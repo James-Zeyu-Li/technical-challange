@@ -1,9 +1,4 @@
-"""Per-source configuration: field maps used by `normalize()`.
-
-Each entry only declares data (source key + type caster) for the target
-schema fields (id, title, price, category). Adding a new source means
-adding a new map here, not new branching logic in the normalizer.
-"""
+"""Per-source declarative field maps used by `normalize()`."""
 
 from __future__ import annotations
 

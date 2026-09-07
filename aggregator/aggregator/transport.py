@@ -1,12 +1,4 @@
-"""Thin urllib-based HTTP transport adapter (stdlib only, no third-party deps).
-
-The only job here is translation: `urllib` raises `HTTPError` for 4xx/5xx
-responses and `URLError` for network-level failures, but `fetch_with_retry()`
-expects either a normal `HTTPResponse` (any status code) or a raised
-`TimeoutError`/`ConnectionError`. This module does that translation and
-nothing else - it doesn't decide what's retryable, that's fetch_with_retry's
-job.
-"""
+"""Thin urllib-based HTTP transport adapter (stdlib only); translates urllib's errors into HTTPResponse/TimeoutError/ConnectionError."""
 
 from __future__ import annotations
 
