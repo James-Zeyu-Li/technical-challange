@@ -3,8 +3,9 @@ normalize together. `fetch_page` is faked here (no real network, no real
 mock server) - same test-double approach used for the other layers."""
 
 import unittest
+from unittest.mock import Mock
 
-from aggregator.http_retry import HTTPResponse
+from aggregator.http_retry import DEFAULT_BACKOFF_SECONDS, HTTPResponse
 from aggregator.orchestrator import run, run_source
 
 
@@ -26,9 +27,10 @@ class TestRunSource(unittest.TestCase):
                     status_code=200,
                     body={
                         "page": 1,
-                        "total_pages": 3,
+                        "total_pages": 1,
                         "products": [
-                            {"id": "a-101", "name": "Mechanical Keyboard", "price": 89.99, "category": "electronics"}
+                            {"id": "a-101", "name": "Mechanical Keyboard",
+                                "price": 89.99, "category": "electronics"}
                         ],
                     },
                 )
@@ -39,7 +41,8 @@ class TestRunSource(unittest.TestCase):
         self.assertEqual(result.skipped, 0)
         self.assertEqual(
             result.records,
-            [{"source": "source_a", "id": "a-101", "title": "Mechanical Keyboard", "price": 89.99, "category": "electronics"}],
+            [{"source": "source_a", "id": "a-101", "title": "Mechanical Keyboard",
+                "price": 89.99, "category": "electronics"}],
         )
 
     def test_malformed_record_is_skipped_and_counted_without_failing_the_page(self):
@@ -50,10 +53,12 @@ class TestRunSource(unittest.TestCase):
                     status_code=200,
                     body={
                         "items": [
-                            {"sku": "b-201", "title": "Desk Lamp", "amount_cents": 3499, "department": "home"},
-                            {"sku": "b-205", "title": "Broken Price Example", "amount_cents": "not-a-number", "department": "home"},
+                            {"sku": "b-201", "title": "Desk Lamp",
+                                "amount_cents": 3499, "department": "home"},
+                            {"sku": "b-205", "title": "Broken Price Example",
+                                "amount_cents": "not-a-number", "department": "home"},
                         ],
-                        "next_cursor": "cursor-2",
+                        "next_cursor": None,
                     },
                 )
             }
@@ -84,13 +89,15 @@ class TestRun(unittest.TestCase):
             if "source-a" in url:
                 return HTTPResponse(
                     status_code=200,
-                    body={"page": 1, "total_pages": 3, "products": [{"id": "a-101", "name": "Keyboard", "price": 89.99, "category": "electronics"}]},
+                    body={"page": 1, "total_pages": 1, "products": [
+                        {"id": "a-101", "name": "Keyboard", "price": 89.99, "category": "electronics"}]},
                 )
             if "source-b" in url:
                 return HTTPResponse(status_code=503, headers={"Retry-After": "0"})
             return HTTPResponse(
                 status_code=200,
-                body={"data": [{"product_id": "c-301", "product_name": "USB-C Hub", "price": "49.50", "type": "electronics"}], "next_offset": 2},
+                body={"data": [{"product_id": "c-301", "product_name": "USB-C Hub",
+                                "price": "49.50", "type": "electronics"}], "next_offset": None},
             )
 
         summary = run("http://localhost:8080", fetch_page)
@@ -108,11 +115,14 @@ class TestRun(unittest.TestCase):
 
         def fetch_page(url: str) -> HTTPResponse:
             if "source-a" in url:
-                body = {"page": 1, "total_pages": 1, "products": [{"id": "a-1", "name": "X", "price": 1.0, "category": "c"}]}
+                body = {"page": 1, "total_pages": 1, "products": [
+                    {"id": "a-1", "name": "X", "price": 1.0, "category": "c"}]}
             elif "source-b" in url:
-                body = {"items": [{"sku": "b-1", "title": "Y", "amount_cents": 100, "department": "d"}], "next_cursor": None}
+                body = {"items": [
+                    {"sku": "b-1", "title": "Y", "amount_cents": 100, "department": "d"}], "next_cursor": None}
             else:
-                body = {"data": [{"product_id": "c-1", "product_name": "Z", "price": "1.00", "type": "e"}], "next_offset": None}
+                body = {"data": [{"product_id": "c-1", "product_name": "Z",
+                                  "price": "1.00", "type": "e"}], "next_offset": None}
             return HTTPResponse(status_code=200, body=body)
 
         summary = run("http://localhost:8080", fetch_page)
@@ -126,6 +136,30 @@ class TestRun(unittest.TestCase):
 
         summary = run("http://localhost:8080", always_fails)
         self.assertEqual(summary.status, "failed")
+
+
+class TestOrchestratorForwardsSleepFn(unittest.TestCase):
+    """run_source/run must accept and forward sleep_fn/now_fn down into
+    fetch_all_pages, not just default to real time.sleep - otherwise a
+    retry's backoff sleep is unreachable through the orchestrator's public
+    interface, the same gap fixed in fetch_all_pages itself."""
+
+    def test_run_source_forwards_sleep_fn_to_retry_backoff(self):
+        """A retryable failure with no Retry-After header must sleep via the sleep_fn passed into run_source, not real time.sleep."""
+        calls = []
+
+        def fetch_page(url: str) -> HTTPResponse:
+            calls.append(url)
+            if len(calls) == 1:
+                return HTTPResponse(status_code=502)
+            return HTTPResponse(status_code=200, body={"items": [{"sku": "b-1"}], "next_cursor": None})
+
+        sleep_fn = Mock()
+        result = run_source("http://localhost:8080",
+                            "source_b", fetch_page, sleep_fn=sleep_fn)
+
+        self.assertIsNone(result.error)
+        sleep_fn.assert_called_once_with(DEFAULT_BACKOFF_SECONDS)
 
 
 if __name__ == "__main__":
