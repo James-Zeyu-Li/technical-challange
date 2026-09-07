@@ -22,6 +22,16 @@ class PaginationLimitExceededError(Exception):
         super().__init__(f"[{source}] pagination did not terminate after {max_pages} pages")
 
 
+class DeadlineExceededError(Exception):
+    """Raised when an optional overall deadline (an absolute now_fn()
+    timestamp) has passed, checked before starting each page's request."""
+
+    def __init__(self, source: str, deadline: float) -> None:
+        self.source = source
+        self.deadline = deadline
+        super().__init__(f"[{source}] exceeded overall run deadline")
+
+
 class MalformedPaginationEnvelopeError(Exception):
     """Raised when a page's pagination-control fields are missing or the wrong type."""
 
@@ -100,6 +110,7 @@ def fetch_all_pages(
     fetch_page: Callable[[str], HTTPResponse] = urllib_get,
     sleep_fn: Callable[[float], None] = time.sleep,
     now_fn: Callable[[], float] = time.monotonic,
+    deadline: float | None = None,
 ) -> list[dict]:
     config = PAGINATION_CONFIG[source_name]
     url: str | None = f"{base_url}{config['first_page_path']}"
@@ -112,6 +123,9 @@ def fetch_all_pages(
     while url is not None:
         if pages_fetched >= MAX_PAGES:
             raise PaginationLimitExceededError(source_name, MAX_PAGES)
+
+        if deadline is not None and now_fn() >= deadline:
+            raise DeadlineExceededError(source_name, deadline)
 
         rate_limiter.wait_if_needed(sleep_fn)
 

@@ -295,5 +295,48 @@ class TestRunLevelObservability(unittest.TestCase):
         self.assertEqual(summary.total_duplicates, 0)
 
 
+class TestOverallRunDeadline(unittest.TestCase):
+    """An optional max_seconds bounds the whole run's wall-clock time,
+    complementing the existing per-request timeout in transport.py."""
+
+    def test_run_source_reports_deadline_exceeded_as_error_not_raised(self):
+        """A source whose deadline has already passed reports it as an error on the result, the same way other source-level failures are handled."""
+
+        def fetch_page(url: str) -> HTTPResponse:
+            raise AssertionError("should not be called once the deadline has passed")
+
+        now_fn = Mock(return_value=100.0)
+        result = run_source("http://localhost:8080", "source_a", fetch_page, now_fn=now_fn, deadline=99.0)
+        self.assertIsNotNone(result.error)
+        self.assertEqual(result.records, [])
+
+    def test_run_stops_starting_new_sources_once_deadline_passed(self):
+        """Once the overall deadline has passed, sources that haven't started yet are skipped rather than attempted."""
+
+        class FakeClock:
+            def __init__(self):
+                self.now = 0.0
+
+            def __call__(self) -> float:
+                return self.now
+
+        clock = FakeClock()
+
+        def fetch_page(url: str) -> HTTPResponse:
+            if "source-a" in url:
+                # Simulate source_a alone taking longer than the whole run's budget.
+                clock.now += 10.0
+                return HTTPResponse(status_code=200, body={"page": 1, "total_pages": 1, "products": [{"id": "a-1"}]})
+            raise AssertionError("should not be called: deadline already passed by the time this source starts")
+
+        summary = run("http://localhost:8080", fetch_page, now_fn=clock, max_seconds=1.0)
+
+        self.assertEqual(summary.status, "partial_success")
+        by_source = {r.source: r for r in summary.results}
+        self.assertIsNone(by_source["source_a"].error)
+        self.assertIsNotNone(by_source["source_b"].error)
+        self.assertIsNotNone(by_source["source_c"].error)
+
+
 if __name__ == "__main__":
     unittest.main()

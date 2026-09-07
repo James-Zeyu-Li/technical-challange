@@ -21,6 +21,7 @@ from aggregator.http_retry import (
 )
 from aggregator.pagination import (
     MAX_PAGES,
+    DeadlineExceededError,
     MalformedPaginationEnvelopeError,
     PaginationLimitExceededError,
     fetch_all_pages,
@@ -380,6 +381,56 @@ class TestFetchAllPagesForwardsSleepFn(unittest.TestCase):
 
         self.assertEqual([r["sku"] for r in records], ["b-1"])
         sleep_fn.assert_called_once_with(DEFAULT_BACKOFF_SECONDS)
+
+
+class TestOverallRunDeadline(unittest.TestCase):
+    """An optional absolute deadline (an absolute timestamp from now_fn, not
+    a relative duration) lets a caller bound how long a single source's
+    pagination is allowed to keep running, independent of MAX_PAGES."""
+
+    def test_no_deadline_means_no_limit(self):
+        """deadline=None (the default) behaves exactly as before, no matter what now_fn returns."""
+        fetch_page = fake_fetch_page(
+            {
+                f"{BASE_URL}/source-a/products?page=1": HTTPResponse(
+                    status_code=200, body={"page": 1, "total_pages": 1, "products": [{"id": "a-1"}]}
+                )
+            }
+        )
+        now_fn = Mock(return_value=100.0)
+        records = fetch_all_pages(BASE_URL, "source_a", fetch_page, now_fn=now_fn)
+        self.assertEqual([r["id"] for r in records], ["a-1"])
+
+    def test_deadline_already_passed_raises_before_any_request(self):
+        """If the deadline has already passed before the first page, no request is made at all."""
+        calls = []
+
+        def fetch_page(url: str) -> HTTPResponse:
+            calls.append(url)
+            return HTTPResponse(status_code=200, body={"page": 1, "total_pages": 1, "products": []})
+
+        now_fn = Mock(return_value=100.0)
+        with self.assertRaises(DeadlineExceededError):
+            fetch_all_pages(BASE_URL, "source_a", fetch_page, now_fn=now_fn, deadline=99.0)
+        self.assertEqual(calls, [])
+
+    def test_deadline_exceeded_partway_through_pagination_stops_further_pages(self):
+        """A deadline that's fine for page 1 but passed by the time page 2 would be requested stops pagination there, without fetching page 2."""
+        fetch_page = fake_fetch_page(
+            {
+                f"{BASE_URL}/source-a/products?page=1": HTTPResponse(
+                    status_code=200, body={"page": 1, "total_pages": 3, "products": [{"id": "a-1"}]}
+                ),
+                f"{BASE_URL}/source-a/products?page=2": HTTPResponse(
+                    status_code=200, body={"page": 2, "total_pages": 3, "products": [{"id": "a-2"}]}
+                ),
+            }
+        )
+        # First deadline check (before page 1) passes at 100.0; second check
+        # (before page 2) sees 200.0, past the deadline of 150.0.
+        now_fn = Mock(side_effect=[100.0, 101.0, 200.0])
+        with self.assertRaises(DeadlineExceededError):
+            fetch_all_pages(BASE_URL, "source_a", fetch_page, now_fn=now_fn, deadline=150.0)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,11 @@ from dataclasses import dataclass, field
 
 from aggregator.http_retry import HTTPResponse, RetryExhaustedError
 from aggregator.normalize import MalformedRecordError, normalize
-from aggregator.pagination import MalformedPaginationEnvelopeError, fetch_all_pages
+from aggregator.pagination import (
+    DeadlineExceededError,
+    MalformedPaginationEnvelopeError,
+    fetch_all_pages,
+)
 from aggregator.sources import FIELD_MAPS
 from aggregator.transport import urllib_get
 
@@ -70,6 +74,7 @@ def run_source(
     fetch_page: Callable[[str], HTTPResponse] = urllib_get,
     sleep_fn: Callable[[float], None] = time.sleep,
     now_fn: Callable[[], float] = time.monotonic,
+    deadline: float | None = None,
 ) -> SourceResult:
     """Fetch every page and normalize every record for one source."""
     field_map = FIELD_MAPS[source_name]
@@ -84,9 +89,9 @@ def run_source(
     started_at = now_fn()
     try:
         raw_records = fetch_all_pages(
-            base_url, source_name, fetch_page, sleep_fn=counting_sleep_fn, now_fn=now_fn
+            base_url, source_name, fetch_page, sleep_fn=counting_sleep_fn, now_fn=now_fn, deadline=deadline
         )
-    except (RetryExhaustedError, MalformedPaginationEnvelopeError) as exc:
+    except (RetryExhaustedError, MalformedPaginationEnvelopeError, DeadlineExceededError) as exc:
         logger.error("%s: giving up after %d wait(s): %s", source_name, waits, exc)
         return SourceResult(source=source_name, error=str(exc), elapsed_seconds=now_fn() - started_at, waits=waits)
 
@@ -117,10 +122,18 @@ def run(
     fetch_page: Callable[[str], HTTPResponse] = urllib_get,
     sleep_fn: Callable[[float], None] = time.sleep,
     now_fn: Callable[[], float] = time.monotonic,
+    max_seconds: float | None = None,
 ) -> RunSummary:
-    """Fetch and normalize all sources, one after another."""
+    """Fetch and normalize all sources, one after another.
+
+    max_seconds, if given, bounds the whole run's wall-clock time. A source
+    whose deadline has already passed by the time its turn comes up is
+    reported as failed rather than attempted.
+    """
+    deadline = now_fn() + max_seconds if max_seconds is not None else None
     results = [
-        run_source(base_url, source_name, fetch_page, sleep_fn, now_fn) for source_name in FIELD_MAPS
+        run_source(base_url, source_name, fetch_page, sleep_fn, now_fn, deadline)
+        for source_name in FIELD_MAPS
     ]
     return RunSummary(results=results)
 
