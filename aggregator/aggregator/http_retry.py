@@ -1,12 +1,4 @@
-"""Generic retryable HTTP fetch layer.
-
-This sits between the raw HTTP client and the normalizer, and is the same
-for every source (see SPEC.md Non-Goals: retry policy is a single global
-constant, not tuned per source or per status code).
-
-`transport` is injected so this module has no dependency on a real HTTP
-library, which keeps tests fast and network-free.
-"""
+"""Generic, source-agnostic retry engine sitting between transport and pagination."""
 
 from __future__ import annotations
 

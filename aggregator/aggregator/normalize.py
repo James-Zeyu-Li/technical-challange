@@ -1,9 +1,4 @@
-"""Generic normalization: turns a raw source record into the unified product schema.
-
-Per-source differences (field names, types) live in `sources.py` as data
-(field maps), not as branching logic here. This function is the same for
-every source; only the field map passed in changes.
-"""
+"""Generic normalization: converts a raw source record into the unified product schema."""
 
 from __future__ import annotations
 
