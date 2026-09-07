@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable
 
 from aggregator.http_retry import HTTPResponse, fetch_with_retry
+from aggregator.rate_limiter import RateLimiter
 from aggregator.transport import urllib_get
 
 MAX_PAGES = 10
@@ -68,10 +69,11 @@ def _source_c_next_url(base_url: str, source: str, body: dict) -> str | None:
     return f"{base_url}/source-c/products?offset={next_offset}&limit=2"
 
 
-# min_interval: minimum seconds between requests to this source, or None
-# for no proactive throttling. Source C allows 2 requests/second; 0.6s
-# spacing keeps every pair of requests comfortably outside any 1-second
-# window with margin for timing jitter, at the cost of some run time.
+# min_interval: default minimum seconds between requests to this source, or
+# None for no proactive throttling. This is only a fallback - RateLimiter
+# prefers the source's own X-RateLimit-Limit/X-RateLimit-Window response
+# headers when present. Source C's fallback (0.6s) matches its documented
+# 2-requests/second limit with margin for timing jitter.
 PAGINATION_CONFIG = {
     "source_a": {
         "first_page_path": "/source-a/products?page=1",
@@ -105,22 +107,18 @@ def fetch_all_pages(
     url: str | None = f"{base_url}{config['first_page_path']}"
     records_key = config["records_key"]
     next_url_fn = config["next_url"]
-    min_interval = config["min_interval"]
+    rate_limiter = RateLimiter(config["min_interval"], now_fn=now_fn)
 
     all_records: list[dict] = []
     pages_fetched = 0
-    last_request_at: float | None = None
     while url is not None:
         if pages_fetched >= MAX_PAGES:
             raise PaginationLimitExceededError(source_name, MAX_PAGES)
 
-        if min_interval is not None and last_request_at is not None:
-            wait = min_interval - (now_fn() - last_request_at)
-            if wait > 0:
-                sleep_fn(wait)
+        rate_limiter.wait_if_needed(sleep_fn)
 
         response = fetch_with_retry(lambda u=url: fetch_page(u), sleep_fn=sleep_fn)
-        last_request_at = now_fn()
+        rate_limiter.record_request(response.headers)
         pages_fetched += 1
         body = response.body
 
