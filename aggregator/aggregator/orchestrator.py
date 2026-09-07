@@ -18,6 +18,7 @@ class SourceResult:
     source: str
     records: list[dict] = field(default_factory=list)
     skipped: int = 0
+    duplicates: int = 0
     error: str | None = None
 
 
@@ -51,11 +52,19 @@ def run_source(
         return SourceResult(source=source_name, error=str(exc))
 
     result = SourceResult(source=source_name)
+    seen_ids: set[str] = set()
     for raw in raw_records:
         try:
-            result.records.append(normalize(raw, source_name, field_map))
+            normalized = normalize(raw, source_name, field_map)
         except MalformedRecordError:
             result.skipped += 1
+            continue
+
+        if normalized["id"] in seen_ids:
+            result.duplicates += 1
+            continue
+        seen_ids.add(normalized["id"])
+        result.records.append(normalized)
     return result
 
 
@@ -78,7 +87,9 @@ def main() -> None:
             print(f"{result.source}: FAILED - {result.error}")
         else:
             print(
-                f"{result.source}: {len(result.records)} records, {result.skipped} skipped")
+                f"{result.source}: {len(result.records)} records, "
+                f"{result.skipped} skipped, {result.duplicates} duplicates"
+            )
     print(f"Overall: {summary.status}")
 
 

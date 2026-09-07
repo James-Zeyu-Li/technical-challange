@@ -162,5 +162,55 @@ class TestOrchestratorForwardsSleepFn(unittest.TestCase):
         sleep_fn.assert_called_once_with(DEFAULT_BACKOFF_SECONDS)
 
 
+class TestDuplicateHandling(unittest.TestCase):
+    """Per SPEC.md: duplicate id+source pairs within a single source keep
+    the first-seen record and count the rest as duplicates, rather than
+    silently overwriting or accumulating repeats."""
+
+    def test_duplicate_id_within_a_source_keeps_first_and_counts_rest(self):
+        """Two records sharing the same id on the same source: the first-seen one is kept, the second is counted as a duplicate, not appended."""
+        fetch_page = fake_fetch_page(
+            {
+                "http://localhost:8080/source-a/products?page=1": HTTPResponse(
+                    status_code=200,
+                    body={
+                        "page": 1,
+                        "total_pages": 1,
+                        "products": [
+                            {"id": "a-101", "name": "First Seen", "price": 10.0, "category": "electronics"},
+                            {"id": "a-101", "name": "Duplicate", "price": 99.0, "category": "electronics"},
+                        ],
+                    },
+                )
+            }
+        )
+        result = run_source("http://localhost:8080", "source_a", fetch_page)
+        self.assertIsNone(result.error)
+        self.assertEqual(len(result.records), 1)
+        self.assertEqual(result.records[0]["title"], "First Seen")
+        self.assertEqual(result.duplicates, 1)
+
+    def test_no_duplicates_when_all_ids_are_unique(self):
+        """Distinct ids on the same source are all kept; duplicates stays at 0."""
+        fetch_page = fake_fetch_page(
+            {
+                "http://localhost:8080/source-a/products?page=1": HTTPResponse(
+                    status_code=200,
+                    body={
+                        "page": 1,
+                        "total_pages": 1,
+                        "products": [
+                            {"id": "a-101", "name": "One", "price": 10.0, "category": "electronics"},
+                            {"id": "a-102", "name": "Two", "price": 20.0, "category": "electronics"},
+                        ],
+                    },
+                )
+            }
+        )
+        result = run_source("http://localhost:8080", "source_a", fetch_page)
+        self.assertEqual(len(result.records), 2)
+        self.assertEqual(result.duplicates, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
