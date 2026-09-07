@@ -2,46 +2,47 @@
 
 ## Implementation Approach
 
-- Field normalization: each source has a declarative field map (target field -> source key + type caster). A shared `normalize()` function looks up each target field in the map, applies the caster, and raises a per-record error on failure (missing key / bad type) so bad records can be skipped without failing the whole batch. Per-source branching (if/else on source name) only decides which map to use, not how normalization itself works.
+- **Field normalization.** Each source has a declarative field map from target field to source key plus a type caster. A shared `normalize()` looks up each field, applies the caster, and raises a per-record error on failure, so bad records can be skipped without failing the whole batch. Per-source branching only picks which map to use.
 
 ### Build order (layers)
 
-1. **Normalizer** `[DONE]` — field map + type caster per source, with type coercion/synchronization (e.g. int cents -> float dollars, string price -> float) so all sources emit the same field types. Built and unit-tested first, directly against `fixtures.json`, with no HTTP or retry logic involved.
-
-2. **HTTP retry handler** `[DONE]` — a single generic retry wrapper around each request, added after the normalizer is working. Retry count is a uniform constant (e.g. 3 attempts) across all sources and status codes — not tuned per source or per code — to keep the handler generic as source count grows. What differs per response is only whether it's classified as retryable (5xx, 429, timeout/connection error) vs terminal (other 4xx). Each attempt is tracked by a per-request retry counter; the wait between attempts is driven by a resettable backoff timer that prefers the server's `Retry-After` value when present (used both for transient 502/503 failures and for 429 rate-limit responses), falling back to a fixed/exponential delay otherwise. Conceptually 429 is a proactive rate-limit signal while 502/503 are reactive failure signals, but both are handled by the same retry engine.
-
-3. **HTTP transport adapter** `[DONE]` — a thin `urllib`-based adapter (stdlib only) that performs the actual request and translates results into what `fetch_with_retry` expects: a successful response becomes `HTTPResponse`; an `urllib.error.HTTPError` (4xx/5xx) is caught and translated into an `HTTPResponse` with that status code rather than left to propagate, so the retry engine can see and act on the status code; `urllib.error.URLError`/socket timeouts are translated into `ConnectionError`/`TimeoutError` so the existing retry engine handles them without modification. Tested by mocking `urllib.request.urlopen` (same test-double approach as the retry engine), not against a live server.
-
-4. **Pagination** `[DONE]` — per-source loop that keeps calling the transport+retry layer and advancing the pagination cursor/page/offset until the source reports it's done (or fails permanently). Each of the three pagination styles (page number, cursor, offset/limit) is a small, separate strategy so adding a new source with a known pagination style doesn't require new looping logic.
-
-5. **Orchestrator / main** `[DONE]` — ties transport + retry + pagination + `normalize()` together across all three sources. Runs each source's fetch-and-normalize independently, catching `RetryExhaustedError`/`MalformedPaginationEnvelopeError` (source-level failure) and `MalformedRecordError` (record-level failure) separately so one source's or one record's failure never stops the others.
-
-6. **Concurrency (multithreading)** `[TODO]` — sources are fetched concurrently (one worker per source) once the orchestrator works sequentially, so a slow/retrying source doesn't block the others. Within a source, pagination stays sequential when the source has a rate limit (Source C), using the existing per-source throttle so concurrency at the source level never violates a single source's own rate limit.
-
-7. **Aggregation & run summary** `[PARTIAL]` — duplicate handling (same-source id collisions) and run-level stats (per-source records/skipped/duplicates/elapsed time/wait count, plus cross-source totals via `RunSummary`) are done. Still missing: the `type_coerced_count` signal from SPEC.md's Assumptions (numeric-typed ids being coerced isn't currently counted).
+1. **Normalizer** `[DONE]`. Field map plus type caster per source, with type coercion (int cents to float dollars, string price to float). Unit-tested first against `fixtures.json`, with no HTTP involved.
+2. **HTTP retry handler** `[DONE]`. One generic retry wrapper per request. Retry count is a uniform constant, not tuned per source or code. Retryable statuses (5xx, 429, timeout, connection error) back off using `Retry-After` when present, otherwise a fixed delay. 429 and 5xx are handled by the same engine.
+3. **HTTP transport adapter** `[DONE]`. A thin stdlib `urllib` adapter. Translates `HTTPError` (4xx/5xx) into a normal `HTTPResponse` so the retry engine can see the status code, and translates `URLError`/socket timeouts into `ConnectionError`/`TimeoutError`. Tested by mocking `urlopen`, not against a live server.
+4. **Pagination** `[DONE]`. A per-source loop over the transport and retry layer, advancing cursor/page/offset until done or permanently failed. Each pagination style (page number, cursor, offset+limit) is a small, separate strategy.
+5. **Orchestrator / main** `[DONE]`. Ties transport, retry, pagination, and `normalize()` together across all three sources, catching source-level failures and record-level failures separately so one failure never stops the rest.
+6. **Concurrency** `[DONE]`. Sources are fetched in parallel with one thread per source through `ThreadPoolExecutor`. Each source has no shared mutable state, so this needed no changes to `run_source()` or anything below it. Pagination stays sequential within a rate-limited source, using the existing per-source throttle. An optional `max_seconds` on `run()` sets a soft overall deadline, checked between requests, not able to interrupt one already in flight.
+7. **Aggregation and run summary** `[PARTIAL]`. Duplicate handling and run-level stats (records, skipped, duplicates, elapsed time, wait count, cross-source totals, plus a real wall-clock time for the concurrent run) are done. Still missing is the `type_coerced_count` signal.
 
 ## Major Technical Decisions
 
-- `normalize()` is one generic engine; all per-source knowledge lives in declarative field maps (`sources.py`), not in branching logic. Adding a source means adding a map entry, not touching the engine — this was validated by reasoning through "what if there were 50 sources instead of 3."
-
-- A single global `MAX_ATTEMPTS` constant governs retries for every source and every retryable status code, rather than per-source/per-code tuning, because the system can't know in advance how many retries an arbitrary upstream needs.
-
-- `HTTPError` (status-code exhaustion) and `TransportError` (network-exception exhaustion, wrapping the original error) share a common `RetryExhaustedError` base, so the orchestrator can catch one type for "this fetch ultimately failed" instead of enumerating exception types.
-
-- Ambiguous/malformed values (`None`, `bool`, `NaN`, `Infinity`, nested structures, negative price) are rejected as malformed rather than silently coerced to a plausible-looking default (e.g. `0`), because a silently-wrong value is more dangerous than a visibly-dropped record.
+- **Engine versus config.** `normalize()` is one generic engine. Per-source knowledge lives only in declarative field maps, validated by reasoning through "what if there were 50 sources instead of 3."
+- **One global retry constant.** A single `MAX_ATTEMPTS` governs every source and status code, since the system can't know in advance how many retries an arbitrary upstream needs.
+- **Unified failure type.** `HTTPError` and `TransportError` share a `RetryExhaustedError` base, so callers catch one type for "this fetch ultimately failed."
+- **Reject rather than guess.** Ambiguous values (`None`, `bool`, `NaN`, `Infinity`, nested structures, negative price) are rejected, since a silently-wrong value is worse than a dropped record.
 
 ## Important Tradeoffs
 
-- A uniform retry constant is simpler and scales to more sources without code changes, but may retry a source more than it needs or give up before a slower source would have recovered. Accepted this cost in exchange for genericity.
-
-- Rejecting ambiguous values (NaN/bool/negative price/etc.) maximizes correctness but minimizes yield — some technically-recoverable records are dropped rather than guessed at. Chosen because a wrong-but-plausible value silently corrupting downstream aggregates is worse than a smaller, trustworthy result set.
-
-- Real end-to-end verification against the running mock server is done manually (see README) instead of as an automated test, to avoid the complexity of managing a server subprocess in the test suite within the time budget. This trades some regression safety for simplicity.
-
-- Deriving the throttle interval from `X-RateLimit-Limit`/`X-RateLimit-Window` response headers is more robust than a hardcoded guess, but has real limits: (1) the very first request to a source still uses the static default, since nothing has been learned yet — a wrong-guessed default could still cause a 429 on request #1 before self-correcting from #2 onward; (2) the header names are this mock's own convention, not an HTTP standard (unlike `Retry-After`) — a different rate-limited source using different header names would silently fall back to the static default, gaining no benefit from the dynamic path; (3) it's more code than a single constant (a small `RateLimiter` class instead of one number). Accepted this because the mock already provides trustworthy real data on every response, and ignoring it in favor of a guess seemed like a missed opportunity for a small amount of added complexity.
+- **Uniform retry constant versus per-source tuning.** Simpler and scales without code changes, but may over-retry or give up too early for a given source. Accepted for genericity.
+- **Rejecting malformed values versus maximizing yield.** Drops some technically-recoverable records rather than guessing. A wrong-but-plausible value corrupting downstream aggregates is worse than a smaller, trustworthy result.
+- **Manual versus automated integration verification.** Verified manually against the running mock server instead of automating it, to avoid managing a server subprocess within the time budget.
+- **Dynamic throttle interval versus a static constant.** More robust, but the first request still uses a static guess, and the header names are this mock's own convention, not a standard. Accepted since the mock already provides trustworthy data.
 
 ## Testing and Verification Strategy
 
-- Unit tests (no network, no real sleeps) cover: per-source happy-path normalization; malformed and missing-field records; transient 502/503/429 retry-then-succeed and retry-exhausted paths, including the exact failure-then-success boundary matching Source B's real cursor-3 behavior; mixed error-code sequences (retryable followed by non-retryable, or two different retryable codes back-to-back); timeout/connection-error handling; a malformed `Retry-After` header falling back to the default backoff; pagination across all three styles, envelope corruption, the pagination safety cap, and Source C's proactive throttling (both static and header-derived); source-level failure isolation, duplicate handling, and run-level observability fields (elapsed time, wait counts, cross-source totals). The retry engine's tests are organized by generic engine behavior rather than duplicated per source, since `fetch_with_retry()` doesn't know which source it's called for.
+Unit tests only. No network, no real sleeps, `sleep_fn`/`now_fn` are injected.
 
-- Deliberately not covered by automated tests: a real integration run against the running mock server (verified manually instead — see README); load/concurrency stress testing; the `type_coerced_count` signal (not yet implemented).
+### Covered
+
+- Per-source normalization, plus malformed and missing-field records.
+- Transient 502/503/429 retry paths, including the exact boundary matching Source B's real cursor-3 behavior.
+- Mixed error-code sequences, timeout/connection errors, and a malformed `Retry-After` header.
+- Pagination across all three styles, envelope corruption, the safety cap, and Source C's throttling.
+- Source-level failure isolation, duplicate handling, and run-level observability fields.
+- Concurrent fetching (real wall-clock overlap, not just the sequential-equivalent result), stable result ordering, and the overall run deadline.
+
+### Deliberately not covered
+
+- A real integration run against the mock server. Verified manually instead, see README.
+- Load and concurrency stress testing.
+- The `type_coerced_count` signal.
